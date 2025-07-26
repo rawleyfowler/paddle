@@ -1,0 +1,65 @@
+STDIN(1)              User Contributed Perl Documentation             STDIN(1)
+
+
+NAME
+       paddle - log processor to send logs from logdirs to TCP syslog
+
+SYNOPSIS
+       paddle [-p] [host:port]
+
+DESCRIPTION
+       paddle reads log lines on standard input and sends them as RFC5424
+       syslog messages to host:port (or "localhost:514" by default) using TCP
+       with RFC6587 octet counting as a frame format.
+
+       (This format is understood by VictoriaLogs.)
+
+       The following log formats are supported:
+
+       svlog -t
+           Hexadecimal TAI timestamps.  Caveat: no leap second adjustment is
+           performed.
+
+       svlog -tt, svlog -ttt, s6-log T
+           ISO8601 timestamps with "T", "_" or " " separator between date and
+           time.  The subsecond part is normalized to six digits.  Timestamps
+           need to be UTC.
+
+OPTIONS
+       -p  Enable useful behavior as a log processor for svlogd or s6-log.
+
+           In case of a connection or transmission error, standard input is
+           copied to standard error, which will result in reprocessing the
+           logs on the next execution.  (paddle needs to be run from tryto(1)
+           to make this work.)
+
+EXIT STATUS
+       The paddle utility exits 0 on success, and >0 if an error occurs.
+
+       When -p is used, paddle always exits with status 0 unless the command
+       line is invalid.
+
+EXAMPLES
+       A svlogd(1) config file to ship logs every 60 seconds to a local
+       VictoriaLogs instance listening on port 1514:
+
+           s1048576
+           t60
+           n10
+           !tryto -p -t10 paddle -p localhost:1514
+
+SEE ALSO
+       svlogd(1), s6-log(1), tryto(1), RFC5424
+
+AUTHORS
+       Leah Neukirchen <leah@vuxu.org>
+
+LICENSE
+       paddle is in the public domain.
+
+       To the extent possible under law, the creator of this work has waived
+       all copyright and related or neighboring rights to this work.
+
+       <https://creativecommons.org/publicdomain/zero/1.0/>
+
+perl v5.40.2                      2025-07-26                          STDIN(1)

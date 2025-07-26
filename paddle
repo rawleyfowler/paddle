@@ -1,0 +1,228 @@
+#!/usr/bin/perl -w
+# paddle - log processor to send logs from logdirs to TCP syslog
+
+use v5.16;
+
+use autodie;
+use bytes;
+
+use Getopt::Long;
+use IO::Socket::IP;
+use POSIX qw(strftime);
+use Sys::Syslog qw(:standard :macros);
+use Net::Domain qw(hostname hostfqdn);
+
+my $pflag = 0;
+Getopt::Long::Configure("bundling");
+GetOptions ("p" => \$pflag)
+    or die("Usage: paddle [-p] [host:port]\n");
+
+# This yields better results than hostfqdn.
+sub hostname_f {
+    my $out = `hostname -f 2>/dev/null`;
+    if ($out =~ /\./) {
+        chomp $out;
+        return $out;
+    } else {
+        return undef;
+    }
+}
+
+my $host = hostname_f() // hostfqdn() // hostname() // "-";
+
+my %facilities = (
+    "auth"     => LOG_AUTH,
+    "authpriv" => LOG_AUTHPRIV,
+    "cron"     => LOG_CRON,
+    "daemon"   => LOG_DAEMON,
+    "ftp"      => LOG_FTP,
+    "kern"     => LOG_KERN,
+    "lpr"      => LOG_LPR,
+    "mail"     => LOG_MAIL,
+    "news"     => LOG_NEWS,
+    "syslog"   => LOG_SYSLOG,
+    "user"     => LOG_USER,
+    "uucp"     => LOG_UUCP,
+    "local0"   => LOG_LOCAL0,
+    "local1"   => LOG_LOCAL1,
+    "local2"   => LOG_LOCAL2,
+    "local3"   => LOG_LOCAL3,
+    "local4"   => LOG_LOCAL4,
+    "local5"   => LOG_LOCAL5,
+    "local6"   => LOG_LOCAL6,
+    "local7"   => LOG_LOCAL7,
+);
+
+my %priorities = (
+    "alert"    => LOG_ALERT,
+    "crit"     => LOG_CRIT,
+    "debug"    => LOG_DEBUG,
+    "emerg"    => LOG_EMERG,
+    "err"      => LOG_ERR,
+    "error"    => LOG_ERR,
+    "info"     => LOG_INFO,
+    "notice"   => LOG_NOTICE,
+    "panic"    => LOG_EMERG,
+    "warn"     => LOG_WARNING,
+    "warning"  => LOG_WARNING,
+);
+
+sub rescue {
+    die "$_[0]\n"  unless $pflag;
+
+    print "error: $_[0], spooling logs into state file.\n";
+    while (<STDIN>) {
+        print STDERR $_;
+    }
+    exit 0;
+}
+
+my $addr = shift // "localhost:514";
+my $sock = IO::Socket::IP->new($addr)
+    or rescue "Cannot construct socket to $addr: $IO::Socket::errstr";
+
+while (<STDIN>) {
+    if (
+        /^
+         (?:
+           # svlogd -t
+           (@[[:xdigit:]]{24})
+         |
+           # svlogd -tt, svlogd -ttt, TZ=UTC0 s6-log T
+           (\d\d\d\d-\d\d-\d\d[T_ ]\d\d:\d\d:\d\d)(\.\d+)?[ ]?
+         )
+         [ ]
+         (\w+)\.(\w+):
+         [ ]
+         (?:
+           \w\w\w[ ][ \d]\d[ ]\d\d:\d\d:\d\d
+           [ ]
+         )?
+         (?:
+           (\S+?)(?:\[(\d+)\])?:
+           [ ]
+         )?
+         (.*)/x
+      )
+    {
+        my $timestamp;
+        if (defined $1) {
+            my $secs = hex(substr($1,9,8)) - 10; # account for TAI-10
+            my $microsecs = hex(substr($1,17,8)) / 1e3;
+            $timestamp = sprintf "%s.%06.0fZ",
+              strftime("%Y-%m-%dT%H:%M:%S", gmtime($secs)), $microsecs;
+        } else {
+            my $subsec = $3 // ".000000";
+            # need exactly 6 seconds of subsecond precision
+            if (length $subsec < 7) { $subsec .= "0" x ( 7 - length $subsec ) }
+            elsif (length $subsec > 7) { $subsec = substr($subsec, 0, 7) }
+            $timestamp = $2 . $subsec . "Z";
+            substr($timestamp,10,1) = "T";
+        }
+
+        my $rfc5424msg = sprintf "<%d>1 %s %s %s %s - - %s",
+          $facilities{$4} | $priorities{$5},
+          $timestamp,
+          $host,
+          $6 // ($4 eq "kern" ? "kernel" : "-"),
+          $7 // "-",
+          $8;
+        my $frame = length($rfc5424msg) . " " . $rfc5424msg . "\n";
+        $sock->send($frame) or rescue "send failed: $!";
+    }
+    else {
+        print "can't parse line line: $_";
+    }
+}
+
+$sock->close()
+    or rescue "close failed: $!";
+
+
+=pod
+
+=head1 NAME
+
+paddle - log processor to send logs from logdirs to TCP syslog
+
+=head1 SYNOPSIS
+
+B<paddle> [B<-p>] [I<host>:I<port>]
+
+=head1 DESCRIPTION
+
+B<paddle> reads log lines on standard input and sends them as RFC5424
+syslog messages to I<host>:I<port> (or C<localhost:514> by default)
+using TCP with RFC6587 octet counting as a frame format.
+
+(This format is understood by VictoriaLogs.)
+
+The following log formats are supported:
+
+=over 4
+
+=item svlog -t
+
+Hexadecimal TAI timestamps.  Caveat: no leap second adjustment is performed.
+
+=item svlog -tt, svlog -ttt, s6-log T
+
+ISO8601 timestamps with C<T>, C<_> or C< > separator between date and time.
+The subsecond part is normalized to six digits.
+Timestamps need to be UTC.
+
+=back
+
+=head1 OPTIONS
+
+=over
+
+=item B<-p>
+
+Enable useful behavior as a log processor for B<svlogd> or B<s6-log>.
+
+In case of a connection or transmission error, standard input is
+copied to standard error, which will result in reprocessing the logs
+on the next execution.  (B<paddle> needs to be run from L<tryto(1)> to
+make this work.)
+
+=back
+
+=head1 EXIT STATUS
+
+The B<paddle> utility exits 0 on success, and >0 if an error occurs.
+
+When B<-p> is used, B<paddle> always exits with status 0 unless the
+command line is invalid.
+
+=head1 EXAMPLES
+
+A L<svlogd(1)> F<config> file to ship logs every 60 seconds to a local
+VictoriaLogs instance listening on port 1514:
+
+    s1048576
+    t60
+    n10
+    !tryto -p -t10 paddle -p localhost:1514
+
+=head1 SEE ALSO
+
+L<svlogd(1)>,
+L<s6-log(1)>,
+L<tryto(1)>,
+RFC5424
+
+=head1 AUTHORS
+
+Leah Neukirchen <leah@vuxu.org>
+
+=head1 LICENSE
+
+B<paddle> is in the public domain.
+
+To the extent possible under law, the creator of this work has waived all
+copyright and related or neighboring rights to this work.
+
+<https://creativecommons.org/publicdomain/zero/1.0/>
+
+=cut
