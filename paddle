@@ -10,25 +10,15 @@ use Getopt::Long;
 use IO::Socket::IP;
 use POSIX qw(strftime);
 use Sys::Syslog qw(:standard :macros);
-use Net::Domain qw(hostname hostfqdn);
+use Sys::Hostname qw(hostname);
+use Net::Domain qw(hostfqdn);
 
 my $pflag = 0;
 Getopt::Long::Configure("bundling");
 GetOptions ("p" => \$pflag)
     or die("Usage: paddle [-p] [host:port]\n");
 
-# This yields better results than hostfqdn.
-sub hostname_f {
-    my $out = `hostname -f 2>/dev/null`;
-    if ($out =~ /\./) {
-        chomp $out;
-        return $out;
-    } else {
-        return undef;
-    }
-}
-
-my $host = hostname_f() // hostfqdn() // hostname() // "-";
+my $host = hostname() // hostfqdn() // "-";
 
 my %facilities = (
     "auth"     => LOG_AUTH,
